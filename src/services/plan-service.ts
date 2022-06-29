@@ -413,7 +413,8 @@ export class PlanService {
       const emptyLineRegex = '^\s*$';
       const headerRegex = '^\\s*(QUERY|---|#).*$';
       const prefixRegex = '^(\\s*->\\s*|\\s*)';
-      const typeRegex = '([^\\r\\n\\t\\f\\v\\:\\(]*?)';
+      // const typeRegex = '([^\\r\\n\\t\\f\\v\\:\\(]*?)';
+      const typeRegex = '([^\\r\\n\\t\\f\\v]*?)';
       // tslint:disable-next-line:max-line-length
       const estimationRegex = '\\(cost=(\\d+\\.\\d+)\\.\\.(\\d+\\.\\d+)\\s+rows=(\\d+)\\s+width=(\\d+)\\)';
       const nonCapturingGroupOpen = '(?:';
