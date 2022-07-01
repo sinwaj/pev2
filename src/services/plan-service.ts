@@ -941,7 +941,10 @@ export class PlanService {
       _.each(settings, (option) => {
         const reg = /^(\S*)\s+=\s+(.*)$/g;
         matches = reg.exec(_.trim(option));
-        el.Settings[matches![1]] = matches![2].replace(/'/g, '');
+        if (matches) {
+          el.Settings[matches![1]] = matches![2].replace(/'/g, '');
+        }
+
       });
       return true;
     }
