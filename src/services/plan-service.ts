@@ -6,13 +6,21 @@ import Node from '@/inode';
 import Worker from '@/iworker';
 import moment from 'moment';
 import clarinet from 'clarinet';
+import NodeHelper from '@/nodehelper';
+import { SourceParser } from '@/services/sourceparser';
+
+
 
 export class PlanService {
 
   private static instance: PlanService;
   private nodeId: number = 0;
+  private nodeHelper: NodeHelper = new NodeHelper();
+  private sourcePareser: SourceParser = new SourceParser();
 
   public createPlan(planName: string, planContent: any, planQuery: string): IPlan {
+
+
     // remove any extra white spaces in the middle of query
     // (\S) start match after any non-whitespace character => group 1
     // (?!$) don't start match after end of line
@@ -29,7 +37,7 @@ export class PlanService {
       planStats: {},
       ctes: [],
       isAnalyze: _.has(planContent.Plan, NodeProp.ACTUAL_ROWS),
-      isVerbose: this.findOutputProperty(planContent.Plan),
+      isVerbose: this.nodeHelper.findOutputProperty(planContent.Plan),
     };
 
     this.nodeId = 1;
@@ -67,7 +75,7 @@ export class PlanService {
     // calculate actuals after processing child nodes so that actual duration
     // takes loops into account
     this.calculateActuals(node);
-    this.calculateExclusives(node);
+    this.nodeHelper.calculateExclusives(node);
 
   }
 
@@ -209,45 +217,10 @@ export class PlanService {
     }
   }
 
-  public cleanupSource(source: string) {
-    // Remove frames around, handles |, ║,
-    source = source.replace(/^(\||║|│)(.*)\1\r?\n/gm, '$2\n');
 
-    // Remove separator lines from various types of borders
-    source = source.replace(/^\+-+\+\r?\n/gm, '');
-    source = source.replace(/^(-|─|═)\1+\r?\n/gm, '');
-    source = source.replace(/^(├|╟|╠|╞)(─|═)\2*(┤|╢|╣|╡)\r?\n/gm, '');
-
-    // Remove more horizontal lines
-    source = source.replace(/^\+-+\+\r?\n/gm, '');
-    source = source.replace(/^└(─)+┘\r?\n/gm, '');
-    source = source.replace(/^╚(═)+╝\r?\n/gm, '');
-    source = source.replace(/^┌(─)+┐\r?\n/gm, '');
-    source = source.replace(/^╔(═)+╗\r?\n/gm, '');
-
-    // Remove quotes around lines, both ' and "
-    source = source.replace(/^(["'])(.*)\1\r?\n/gm, '$2\n');
-
-    // Remove "+" line continuations
-    source = source.replace(/\s*\+\r?\n/g, '\n');
-
-    // Remove "↵" line continuations
-    source = source.replace(/↵\r?/gm, '\n');
-
-    // Remove "query plan" header
-    source = source.replace(/^\s*QUERY PLAN\s*\r?\n/m, '');
-
-    // Remove rowcount
-    // example: (8 rows)
-    // Note: can be translated
-    // example: (8 lignes)
-    source = source.replace(/^\(\d+\s+[a-z]*s?\)(\r?\n|$)/gm, '\n');
-
-    return source;
-  }
 
   public fromSource(source: string) {
-    source = this.cleanupSource(source);
+    source = this.sourcePareser.cleanupSource(source);
 
     let isJson = false;
     try {
@@ -257,105 +230,11 @@ export class PlanService {
     }
 
     if (isJson) {
-      return this.parseJson(source);
+      return this.sourcePareser.parseJson(source);
     } else if (/^(\s*)(\[|\{)\s*\n.*?\1(\]|\})\s*/gms.exec(source)) {
-      return this.fromJson(source);
+      return this.sourcePareser.fromJson(source);
     }
     return this.fromText(source);
-  }
-
-  public fromJson(source: string) {
-    // We need to remove things before and/or after explain
-    // To do this, first - split explain into lines...
-    const sourceLines = source.split(/[\r\n]+/);
-
-    // Now, find first line of explain, and cache it's prefix (some spaces ...)
-    let prefix = '';
-    let firstLineIndex = 0;
-    _.each(sourceLines, (l: string, index: number) => {
-      const matches = /^(\s*)(\[|\{)\s*$/.exec(l);
-      if (matches) {
-        prefix = matches[1];
-        firstLineIndex = index;
-        return false;
-      }
-    });
-    // now find last line
-    let lastLineIndex = 0;
-    _.each(sourceLines, (l: string, index: number) => {
-      const matches = new RegExp('^' + prefix + '(\]|\})\s*$').exec(l);
-      if (matches) {
-        lastLineIndex = index;
-        return false;
-      }
-    });
-
-    const useSource: string = sourceLines.slice(firstLineIndex, lastLineIndex + 1).join('\n');
-
-    return this.parseJson(useSource);
-  }
-
-  // Stream parse JSON as it can contain duplicate keys (workers)
-  public parseJson(source: string) {
-    const parser = clarinet.parser();
-    const elements: any[] = [];
-    let root: any = null;
-    // Store the level and duplicated object|array
-    let duplicated: [number, any] | null = null;
-    parser.onvalue = (v: any) => {
-      const current = elements[elements.length - 1];
-      if (_.isArray(current)) {
-        current.push(v);
-      } else {
-        const keys = Object.keys(current);
-        const lastKey = keys[keys.length - 1];
-        current[lastKey] = v;
-      }
-    };
-    parser.onopenobject = (key: any) => {
-      const o: {[key: string]: any} = {};
-      o[key] = null;
-      elements.push(o);
-    };
-    parser.onkey = (key: any) => {
-      const current = elements[elements.length - 1];
-      const keys = Object.keys(current);
-      if (keys.indexOf(key) !== -1) {
-        duplicated = [elements.length - 1, current[key]];
-      } else {
-        current[key] = null;
-      }
-    };
-    parser.onopenarray = () => {
-      elements.push([]);
-    };
-    parser.oncloseobject = parser.onclosearray = () => {
-      const popped = elements.pop();
-
-      if (!elements.length) {
-        root = popped;
-      } else {
-        const current = elements[elements.length - 1];
-
-        if (duplicated && duplicated[0] === elements.length - 1) {
-          _.merge(duplicated[1], popped);
-          duplicated = null;
-        } else {
-          if (_.isArray(current)) {
-            current.push(popped);
-          } else {
-            const keys = Object.keys(current);
-            const lastKey = keys[keys.length - 1];
-            current[lastKey] = popped;
-          }
-        }
-      }
-    };
-    parser.write(source).close();
-    if (root instanceof Array) {
-      root = root[0];
-    }
-    return root;
   }
 
   public splitIntoLines(text: string): string[] {
@@ -621,7 +500,7 @@ export class PlanService {
           worker[NodeProp.ACTUAL_LOOPS] = parseInt(workerMatches[6], 0);
         }
 
-        if (this.parseSort(workerMatches[10], worker)) {
+        if (this.nodeHelper.parseSort(workerMatches[10], worker)) {
           return;
         }
 
@@ -641,7 +520,7 @@ export class PlanService {
         root.Triggers = root.Triggers || [];
         root.Triggers.push({
           'Trigger Name': triggerMatches[2],
-          'Time': this.parseTime(triggerMatches[3]),
+          'Time': this.nodeHelper.parseTime(triggerMatches[3]),
           'Calls': triggerMatches[4],
         });
       } else if (jitMatches) {
@@ -688,39 +567,39 @@ export class PlanService {
           return;
         }
 
-        if (this.parseSort(extraMatches[2], element)) {
+        if (this.nodeHelper.parseSort(extraMatches[2], element)) {
           return;
         }
 
-        if (this.parseBuffers(extraMatches[2], element)) {
+        if (this.nodeHelper.parseBuffers(extraMatches[2], element)) {
           return;
         }
 
-        if (this.parseWAL(extraMatches[2], element)) {
+        if (this.nodeHelper.parseWAL(extraMatches[2], element)) {
           return;
         }
 
-        if (this.parseIOTimings(extraMatches[2], element)) {
+        if (this.nodeHelper.parseIOTimings(extraMatches[2], element)) {
           return;
         }
 
-        if (this.parseOptions(extraMatches[2], element)) {
+        if (this.nodeHelper.parseOptions(extraMatches[2], element)) {
           return;
         }
 
-        if (this.parseTiming(extraMatches[2], element)) {
+        if (this.nodeHelper.parseTiming(extraMatches[2], element)) {
           return;
         }
 
-        if (this.parseSettings(extraMatches[2], element)) {
+        if (this.nodeHelper.parseSettings(extraMatches[2], element)) {
           return;
         }
 
-        if (this.parseSortGroups(extraMatches[2], element)) {
+        if (this.nodeHelper.parseSortGroups(extraMatches[2], element)) {
           return;
         }
 
-        if (this.parseSortKey(extraMatches[2], element)) {
+        if (this.nodeHelper.parseSortKey(extraMatches[2], element)) {
           return;
         }
 
@@ -744,278 +623,19 @@ export class PlanService {
     return root;
   }
 
-  private parseSortKey(text: string, el: Node): boolean {
-    const sortRegex = /^\s*((?:Sort|Presorted) Key):\s+(.*)/g;
-    const sortMatches = sortRegex.exec(text);
-    if (sortMatches) {
-      el[sortMatches[1]] = _.map(splitBalanced(sortMatches[2], ','), _.trim);
-      return true;
-    }
-    return false;
-  }
-
-  private parseSort(text: string, el: Node | Worker): boolean {
-    /*
-     * Groups
-     * 2: Sort Method
-     * 3: Sort Space Type
-     * 4: Sort Space Used
-     */
-    const sortRegex = /^(\s*)Sort Method:\s+(.*)\s+(Memory|Disk):\s+(?:(\S*)kB)\s*$/g;
-    const sortMatches = sortRegex.exec(text);
-    if (sortMatches) {
-      el[NodeProp.SORT_METHOD] = sortMatches[2].trim();
-      el[NodeProp.SORT_SPACE_USED] = sortMatches[4];
-      el[NodeProp.SORT_SPACE_TYPE] = sortMatches[3];
-      return true;
-    }
-    return false;
-  }
-
-  private parseBuffers(text: string, el: Node | Worker): boolean {
-    /*
-     * Groups
-     */
-    const buffersRegex = /Buffers:\s+(.*)\s*$/g;
-    const buffersMatches = buffersRegex.exec(text);
-
-    /*
-     * Groups:
-     * 1: type
-     * 2: info
-     */
-    if (buffersMatches) {
-      _.each(buffersMatches[1].split(/,\s+/), (infos) => {
-        const bufferInfoRegex = /(shared|temp|local)\s+(.*)$/g;
-        const m = bufferInfoRegex.exec(infos);
-        if (m) {
-          const type = m[1];
-          // Initiate with default value
-          _.each(['hit', 'read', 'written', 'dirtied'], (method) => {
-            el[_.map([type, method, 'blocks'], _.capitalize).join(' ')] = 0;
-          });
-          _.each(m[2].split(/\s+/), (buffer) => {
-            this.parseBuffer(buffer, type, el);
-          });
-        }
-      });
-      return true;
-    }
-    return false;
-  }
-
-  private parseBuffer(text: string, type: string, el: Node|Worker): void {
-    const s = text.split(/=/);
-    const method = s[0];
-    const value = parseInt(s[1], 0);
-    el[_.map([type, method, 'blocks'], _.capitalize).join(' ')] = value;
-  }
-
   private getWorker(node: Node, workerNumber: number): Worker|null {
     return _.find(node[NodeProp.WORKERS], (worker) => {
       return worker[WorkerProp.WORKER_NUMBER] === workerNumber;
     });
   }
 
-  private parseWAL(text: string, el: Node): boolean {
-    const WALRegex = /WAL:\s+(.*)\s*$/g;
-    const WALMatches = WALRegex.exec(text);
 
-    if (WALMatches) {
-      // Initiate with default value
-      _.each(['Records', 'Bytes', 'FPI'], (type) => {
-        el['WAL ' + type] = 0;
-      });
-      _.each(WALMatches[1].split(/\s+/), (t) => {
-        const s = t.split(/=/);
-        const type = s[0];
-        const value = parseInt(s[1], 0);
-        let typeCaps;
-        switch (type) {
-          case 'fpi':
-            typeCaps = 'FPI';
-            break;
-          default:
-            typeCaps = _.capitalize(type);
-        }
-        el['WAL ' + typeCaps] = value;
-      });
-      return true;
-    }
 
-    return false;
-  }
 
-  private parseIOTimings(text: string, el: Node): boolean {
-    /*
-     * Groups
-     */
-    const iotimingsRegex = /I\/O Timings:\s+(.*)\s*$/g;
-    const iotimingsMatches = iotimingsRegex.exec(text);
 
-    /*
-     * Groups:
-     * 1: type
-     * 2: info
-     */
-    if (iotimingsMatches) {
-      // Initiate with default value
-      el[NodeProp.IO_READ_TIME] = 0;
-      el[NodeProp.IO_WRITE_TIME] = 0;
 
-      _.each(iotimingsMatches[1].split(/\s+/), (timing) => {
-        const s = timing.split(/=/);
-        const method = s[0];
-        const value = parseFloat(s[1]);
-        const prop = 'IO_' + _.upperCase(method) + '_TIME' as keyof typeof NodeProp;
-        el[NodeProp[prop]] = value;
-      });
-      return true;
-    }
-    return false;
-  }
 
-  private parseOptions(text: string, el: Node): boolean {
-    // Parses an options block in JIT block
-    // eg. Options: Inlining false, Optimization false, Expressions true, Deforming true
 
-    /*
-     * Groups
-     */
-    const optionsRegex = /^(\s*)Options:\s+(.*)$/g;
-    const optionsMatches = optionsRegex.exec(text);
 
-    if (optionsMatches) {
-      el.Options = {};
-      const options = optionsMatches[2].split(/\s*,\s*/);
-      let matches;
-      _.each(options, (option) => {
-        const reg = /^(\S*)\s+(.*)$/g;
-        matches = reg.exec(option);
-        el.Options[matches![1]] = JSON.parse(matches![2]);
-      });
-      return true;
-    }
-    return false;
-  }
 
-  private parseTiming(text: string, el: Node): boolean {
-    // Parses a timing block in JIT block
-    // eg. Timing: Generation 0.340 ms, Inlining 0.000 ms, Optimization 0.168 ms, Emission 1.907 ms, Total 2.414 ms
-
-    /*
-     * Groups
-     */
-    const timingRegex = /^(\s*)Timing:\s+(.*)$/g;
-    const timingMatches = timingRegex.exec(text);
-
-    if (timingMatches) {
-      el.Timing = {};
-      const timings = timingMatches[2].split(/\s*,\s*/);
-      let matches;
-      _.each(timings, (option) => {
-        const reg = /^(\S*)\s+(.*)$/g;
-        matches = reg.exec(option);
-        el.Timing[matches![1]] = this.parseTime(matches![2]);
-      });
-      return true;
-    }
-    return false;
-  }
-
-  private parseTime(text: string): number {
-    return parseFloat(text.replace(/(\s*ms)$/, ''));
-  }
-
-  private parseSettings(text: string, el: Node): boolean {
-    // Parses a settings block
-    // eg. Timing: Generation 0.340 ms, Inlining 0.000 ms, Optimization 0.168 ms, Emission 1.907 ms, Total 2.414 ms
-
-    const settingsRegex = /^(\s*)Settings:\s*(.*)$/g;
-    const settingsMatches = settingsRegex.exec(text);
-
-    if (settingsMatches) {
-      el.Settings = {};
-      const settings = splitBalanced(settingsMatches[2], ',');
-      let matches;
-      _.each(settings, (option) => {
-        const reg = /^(\S*)\s+=\s+(.*)$/g;
-        matches = reg.exec(_.trim(option));
-        if (matches) {
-          el.Settings[matches![1]] = matches![2].replace(/'/g, '');
-        }
-
-      });
-      return true;
-    }
-    return false;
-  }
-
-  private parseSortGroups(text: string, el: Node): boolean {
-    // Parses a Full-sort Groups block
-    // eg. Full-sort Groups: 312500  Sort Method: quicksort  Average Memory: 26kB  Peak Memory: 26kB
-    const sortGroupsRegex = /^\s*(Full-sort|Pre-sorted) Groups:\s+([0-9]*)\s+Sort Method[s]*:\s+(.*)\s+Average Memory:\s+(\S*)kB\s+Peak Memory:\s+(\S*)kB.*$/g;
-    const matches = sortGroupsRegex.exec(text);
-
-    if (matches) {
-      const groups: {[key in SortGroupsProp]: any} = {
-        [SortGroupsProp.GROUP_COUNT]: parseInt(matches[2], 0),
-        [SortGroupsProp.SORT_METHODS_USED]: _.map(matches[3].split(','), _.trim),
-        [SortGroupsProp.SORT_SPACE_MEMORY]: {
-          [SortSpaceMemory.AVERAGE_SORT_SPACE_USED]: parseInt(matches[4], 0),
-          [SortSpaceMemory.PEAK_SORT_SPACE_USED]: parseInt(matches[5], 0),
-        },
-      };
-
-      if (matches[1] === 'Full-sort') {
-        el[NodeProp.FULL_SORT_GROUPS] = groups;
-      } else if (matches[1] === 'Pre-sorted') {
-        el[NodeProp.PRE_SORTED_GROUPS] = groups;
-      } else {
-        throw new Error('Unsupported sort groups method');
-      }
-      return true;
-    }
-    return false;
-  }
-
-  private calculateExclusives(node: Node) {
-    // Caculate inclusive value for the current node for the given property
-    const properties: Array<keyof typeof NodeProp> = [
-      'SHARED_HIT_BLOCKS',
-      'SHARED_READ_BLOCKS',
-      'SHARED_DIRTIED_BLOCKS',
-      'SHARED_WRITTEN_BLOCKS',
-      'TEMP_READ_BLOCKS',
-      'TEMP_WRITTEN_BLOCKS',
-      'LOCAL_HIT_BLOCKS',
-      'LOCAL_READ_BLOCKS',
-      'LOCAL_DIRTIED_BLOCKS',
-      'LOCAL_WRITTEN_BLOCKS',
-      'IO_READ_TIME',
-      'IO_WRITE_TIME',
-    ];
-    _.each(properties, (property) => {
-      const sum = _.sumBy(
-        node[NodeProp.PLANS],
-        (child: Node) => {
-
-          return child[NodeProp[property]] || 0;
-        },
-      );
-      const exclusivePropertyString = 'EXCLUSIVE_' + property as keyof typeof NodeProp;
-      node[NodeProp[exclusivePropertyString]] = node[NodeProp[property]] - sum;
-    });
-  }
-
-  private findOutputProperty(node: Node): boolean {
-    // resursively look for an "Output" property
-    const children = node.Plans;
-    if (!children) {
-      return false;
-    }
-    return _.some(children, (child) => {
-      return _.has(child, NodeProp.OUTPUT) || this.findOutputProperty(child);
-    });
-  }
 }

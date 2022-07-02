@@ -1,19 +1,24 @@
 import { PlanService } from '@/services/plan-service';
 import { IPlan } from '@/iplan';
 
+
 describe('PlanService', () => {
   test('Actual durations are correct', () => {
     const planService = new PlanService();
     const source = `
- Nested Loop  (cost=0.00..611.27 rows=13400 width=8) (actual time=0.025..10.198 rows=34956 loops=1)
-   Join Filter: (t1.c1 > t2.c2)
-   Rows Removed by Join Filter: 5244
-   ->  Seq Scan on t1  (cost=0.00..6.02 rows=402 width=4) (actual time=0.013..0.058 rows=402 loops=1)
-   ->  Materialize  (cost=0.00..2.50 rows=100 width=4) (actual time=0.000..0.008 rows=100 loops=402)
-         ->  Seq Scan on t2  (cost=0.00..2.00 rows=100 width=4) (actual time=0.005..0.015 rows=100 loops=1)
- Planning Time: 0.083 ms
- Execution Time: 12.035 ms
+Gather Motion 2:1  (slice1; segments: 2)  (cost=0.00..431.00 rows=1 width=8)
+   ->  Sequence  (cost=0.00..431.00 rows=1 width=8)
+         ->  Partition Selector for sales (dynamic scan id: 1)  (cost=10.00..100.00 rows=50 width=4)
+               Filter: year = 2015
+               Partitions selected:  1 (out of 100)
+         ->  Dynamic Table Scan on sales (dynamic scan id: 1)  (cost=0.00..431.00 rows=1 width=8)
+               Filter: year = 2015
+ Settings:  optimizer=on
+ Optimizer status: PQO version 1.620
+(9 rows)
 `;
+
+
     const r: any = planService.fromSource(source);
     const plan: IPlan = planService.createPlan('', r, '');
     // Materialize duration: total time * loops - Seq Scan duration

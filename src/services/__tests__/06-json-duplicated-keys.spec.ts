@@ -1,4 +1,5 @@
 import { PlanService } from '@/services/plan-service';
+import { SourceParser } from '@/services/sourceparser';
 
 describe('PlanService', () => {
   test('correctly handles duplicated keys in JSON', () => {
@@ -41,7 +42,7 @@ describe('PlanService', () => {
     }
   }
 ]`;
-    const json: any = planService.parseJson(source);
+    const json: any = new SourceParser().parseJson(source);
     expect(json.Plan.Workers.length).toEqual(2);
     expect(json.Plan.Workers[0]['Sort Method']).toEqual('external merge');
     expect(json.Plan.Workers[0]['Actual Startup Time']).toEqual(1487.846);
